@@ -111,6 +111,33 @@ namespace NativeWifi
             }
         }
 
+        public AvailableNetwork[] GetAvailableNetworkList(
+            Guid interfaceGuid,
+            uint flags
+        )
+        {
+            var networkListPtr = IntPtr.Zero;
+            try
+            {
+                var result = NativeMethods.WlanGetAvailableNetworkList(
+                    clientHandle,
+                    ref interfaceGuid,
+                    flags,
+                    IntPtr.Zero,
+                    out networkListPtr
+                );
+                if (result != 0)
+                {
+                    throw new Win32Exception((int)result);
+                }
+                return AvailableNetworkListConverter.FromPtr(networkListPtr);
+            }
+            finally
+            {
+                NativeMethods.WlanFreeMemory(networkListPtr);
+            }
+        }
+
         public InterfaceCapability GetInterfaceCapability(Guid interfaceGuid)
         {
             var capabilityPtr = IntPtr.Zero;
@@ -194,6 +221,23 @@ namespace NativeWifi
                 NativeMethods.WlanFreeMemory(dataPtr);
             }
         }
+
+        public void Scan(Guid interfaceGuid)
+        {
+            // This function returns immediately.
+            // The scan will then be completed within 4 seconds.
+            var result = NativeMethods.WlanScan(
+                clientHandle,
+                ref interfaceGuid,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                IntPtr.Zero
+            );
+            if (result != 0)
+            {
+                throw new Win32Exception((int)result);
+            }
+        }
     }
 
     internal sealed class WlanClientHandle : SafeHandleZeroOrMinusOneIsInvalid
@@ -229,6 +273,50 @@ namespace NativeWifi
                 wlanSignalQuality = st.wlanSignalQuality,
                 rxRate = st.ulRxRate,
                 txRate = st.ulTxRate,
+            };
+        }
+    }
+
+    public class AvailableNetwork
+    {
+        public string profileName;
+        public string dot11Ssid;
+        public uint dot11BssType;
+        public uint numberOfBssids;
+        public bool networkConnectable;
+        public uint wlanNotConnectableReason;
+        public uint numberOfPhyTypes;
+        public uint[] dot11PhyTypes;
+        public bool morePhyTypes;
+        public uint wlanSignalQuality;
+        public bool securityEnabled;
+        public uint dot11DefaultAuthAlgorithm;
+        public uint dot11DefaultCipherAlgorithm;
+        public uint flags;
+        public uint reserved;
+
+        internal static AvailableNetwork FromPtr(IntPtr ptr)
+        {
+            var st = Marshal.PtrToStructure<NativeMethods.WLAN_AVAILABLE_NETWORK>(ptr);
+            var dot11PhyTypes = new uint[st.uNumberOfPhyTypes];
+            Array.Copy(st.dot11PhyTypes, dot11PhyTypes, dot11PhyTypes.Length);
+            return new AvailableNetwork()
+            {
+                profileName = st.strProfileName,
+                dot11Ssid = SsidConverter.ToString(st.dot11Ssid),
+                dot11BssType = st.dot11BssType,
+                numberOfBssids = st.uNumberOfBssids,
+                networkConnectable = st.bNetworkConnectable,
+                wlanNotConnectableReason = st.wlanNotConnectableReason,
+                numberOfPhyTypes = st.uNumberOfPhyTypes,
+                dot11PhyTypes = dot11PhyTypes,
+                morePhyTypes = st.bMorePhyTypes,
+                wlanSignalQuality = st.wlanSignalQuality,
+                securityEnabled = st.bSecurityEnabled,
+                dot11DefaultAuthAlgorithm = st.dot11DefaultAuthAlgorithm,
+                dot11DefaultCipherAlgorithm = st.dot11DefaultCipherAlgorithm,
+                flags = st.dwFlags,
+                reserved = st.dwReserved,
             };
         }
     }
@@ -305,7 +393,7 @@ namespace NativeWifi
                 wlanConnectionMode = st.wlanConnectionMode,
                 profileName = st.strProfileName,
                 wlanAssociationAttributes = AssociationAttributes.FromStruct(st.wlanAssociationAttributes),
-                wlanSecurityAttributes = SecurityAttributes.FromStruct(st.wlanSecurityAttributes)
+                wlanSecurityAttributes = SecurityAttributes.FromStruct(st.wlanSecurityAttributes),
             };
         }
     }
@@ -323,7 +411,7 @@ namespace NativeWifi
         {
             var st = Marshal.PtrToStructure<NativeMethods.WLAN_INTERFACE_CAPABILITY>(ptr);
             var dot11PhyTypes = new uint[st.dwNumberOfSupportedPhys];
-            Array.Copy(st.dot11PhyTypes, dot11PhyTypes, st.dwNumberOfSupportedPhys);
+            Array.Copy(st.dot11PhyTypes, dot11PhyTypes, dot11PhyTypes.Length);
             return new InterfaceCapability
             {
                 interfaceType = st.interfaceType,
@@ -370,6 +458,27 @@ namespace NativeWifi
                 dot11AuthAlgorithm = st.dot11AuthAlgorithm,
                 dot11CipherAlgorithm = st.dot11CipherAlgorithm,
             };
+        }
+    }
+
+    internal static class AvailableNetworkListConverter
+    {
+        public static AvailableNetwork[] FromPtr(IntPtr ptr)
+        {
+            var header = Marshal.PtrToStructure<NativeMethods.WLAN_AVAILABLE_NETWORK_LIST>(ptr);
+            if (header.dwNumberOfItems > 0)
+            {
+                var items = new AvailableNetwork[header.dwNumberOfItems];
+                var itemPtr = IntPtr.Add(ptr, Marshal.SizeOf<NativeMethods.WLAN_AVAILABLE_NETWORK_LIST>());
+                var itemSize = Marshal.SizeOf<NativeMethods.WLAN_AVAILABLE_NETWORK>();
+                for (int i = 0; i < header.dwNumberOfItems; i++)
+                {
+                    items[i] = AvailableNetwork.FromPtr(itemPtr);
+                    itemPtr = IntPtr.Add(itemPtr, itemSize);
+                }
+                return items;
+            }
+            return Array.Empty<AvailableNetwork>();
         }
     }
 
@@ -540,6 +649,15 @@ namespace NativeWifi
         );
 
         [DllImport("wlanapi.dll", SetLastError = true)]
+        public static extern uint WlanGetAvailableNetworkList(
+            WlanClientHandle hClientHandle,
+            ref Guid pInterfaceGuid,
+            uint dwFlags,
+            IntPtr pReserved,
+            out IntPtr ppAvailableNetworkList
+        );
+
+        [DllImport("wlanapi.dll", SetLastError = true)]
         public static extern uint WlanGetInterfaceCapability(
             WlanClientHandle hClientHandle,
             ref Guid pInterfaceGuid,
@@ -577,12 +695,24 @@ namespace NativeWifi
             out uint pWlanOpcodeValueType
         );
 
+        [DllImport("wlanapi.dll", SetLastError = true)]
+        public static extern uint WlanScan(
+            WlanClientHandle hClientHandle,
+            ref Guid pInterfaceGuid,
+            IntPtr pDot11Ssid,
+            IntPtr pIeData,
+            IntPtr pReserved
+        );
+
         [StructLayout(LayoutKind.Sequential)]
         public struct DOT11_BSSID_LIST
         {
             public NDIS_OBJECT_HEADER Header;
             public uint uNumOfEntries;
             public uint uTotalNumOfEntries;
+            //
+            // Note: DOT11_MAC_ADDRESS[] (variable length) follows.
+            //
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -619,6 +749,41 @@ namespace NativeWifi
             public uint wlanSignalQuality;
             public uint ulRxRate;
             public uint ulTxRate;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct WLAN_AVAILABLE_NETWORK
+        {
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+            public string strProfileName;
+            public DOT11_SSID dot11Ssid;
+            public uint dot11BssType;
+            public uint uNumberOfBssids;
+            [MarshalAs(UnmanagedType.Bool)]
+            public bool bNetworkConnectable;
+            public uint wlanNotConnectableReason;
+            public uint uNumberOfPhyTypes;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)]
+            public uint[] dot11PhyTypes;
+            [MarshalAs(UnmanagedType.Bool)]
+            public bool bMorePhyTypes;
+            public uint wlanSignalQuality;
+            [MarshalAs(UnmanagedType.Bool)]
+            public bool bSecurityEnabled;
+            public uint dot11DefaultAuthAlgorithm;
+            public uint dot11DefaultCipherAlgorithm;
+            public uint dwFlags;
+            public uint dwReserved;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct WLAN_AVAILABLE_NETWORK_LIST
+        {
+            public uint dwNumberOfItems;
+            public uint dwIndex;
+            //
+            // Note: WLAN_AVAILABLE_NETWORK[] (variable length) follows.
+            //
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -676,7 +841,7 @@ namespace NativeWifi
             public uint dwFlags;
         }
 
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        [StructLayout(LayoutKind.Sequential)]
         public struct WLAN_INTERFACE_CAPABILITY
         {
             public uint interfaceType;
